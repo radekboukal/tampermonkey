@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         SfcSummary Date Sync
 // @namespace    https://uuapp.plus4u.net/
-// @version      1.4.0
+// @version      1.4.1
 // @description  Hromadná změna datumového intervalu pro všechny UuFinMan.BI.SfcSummary komponenty na stránce
 // @author       SWF
 // @match        https://uuapp.plus4u.net/uu-managementkit-maing02/c6726701235c4f2d85736a4602295884/document*
@@ -26,8 +26,8 @@
       afterDateSet: 500,
       afterConfirm: 1500,
       pollInterval: 200,
-      modalTimeout: 5000,
-      modalCloseTimeout: 5000,
+      modalTimeout: 8000,
+      modalCloseTimeout: 8000,
     },
     debug: true,
   };
@@ -192,9 +192,114 @@
     });
   }
 
-  function formatDateCz(isoDate) {
-    const [y, m, d] = isoDate.split("-");
-    return `${d}.${m}.${y}`;
+  function pad2(value) {
+    return String(value).padStart(2, "0");
+  }
+
+  function parseIsoDateParts(isoDate) {
+    const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec((isoDate || "").trim());
+    if (!match) return null;
+
+    const [, year, month, day] = match;
+    return {
+      year,
+      month,
+      day,
+      monthNum: String(Number(month)),
+      dayNum: String(Number(day)),
+    };
+  }
+
+  function normalizeDateValue(value) {
+    const trimmed = (value || "").trim();
+    if (!trimmed) return null;
+
+    let match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(trimmed);
+    if (match) {
+      return `${match[1]}-${match[2]}-${match[3]}`;
+    }
+
+    match = /^(\d{1,2})\.(\d{1,2})\.(\d{4})$/.exec(trimmed);
+    if (match) {
+      return `${match[3]}-${pad2(match[2])}-${pad2(match[1])}`;
+    }
+
+    match = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec(trimmed);
+    if (match) {
+      return `${match[3]}-${pad2(match[1])}-${pad2(match[2])}`;
+    }
+
+    return null;
+  }
+
+  function isDateLikeValue(value) {
+    return !!normalizeDateValue(value);
+  }
+
+  function buildDateInputCandidates(isoDate) {
+    const parts = parseIsoDateParts(isoDate);
+    if (!parts) return [isoDate];
+
+    const { year, month, day, monthNum, dayNum } = parts;
+    const dotCandidates = [
+      `${day}.${month}.${year}`,
+      `${dayNum}.${month}.${year}`,
+      `${day}.${monthNum}.${year}`,
+      `${dayNum}.${monthNum}.${year}`,
+    ];
+    const slashCandidates = [
+      `${month}/${day}/${year}`,
+      `${monthNum}/${day}/${year}`,
+      `${month}/${dayNum}/${year}`,
+      `${monthNum}/${dayNum}/${year}`,
+    ];
+
+    return Array.from(new Set([
+      ...dotCandidates,
+      ...slashCandidates,
+      `${year}-${month}-${day}`,
+    ]));
+  }
+
+  function getOrderedDateInputCandidates(isoDate, input) {
+    const candidates = buildDateInputCandidates(isoDate);
+    const currentValue = input?.value || "";
+    const placeholder = input?.placeholder || "";
+    const hints = [currentValue, placeholder].filter(Boolean);
+    const families = [];
+
+    if (input?.type === "date" || hints.some((hint) => hint.includes("-"))) families.push("iso");
+    if (hints.some((hint) => hint.includes("/"))) families.push("slash");
+    if (hints.some((hint) => hint.includes("."))) families.push("dot");
+    if (families.length === 0) families.push("dot", "slash", "iso");
+
+    const ordered = [];
+    const pushUnique = (value) => {
+      if (value && !ordered.includes(value)) ordered.push(value);
+    };
+    const getFamily = (value) => {
+      if (value.includes("/")) return "slash";
+      if (value.includes(".")) return "dot";
+      if (value.includes("-")) return "iso";
+      return "other";
+    };
+
+    for (const hint of hints) {
+      if (candidates.includes(hint)) pushUnique(hint);
+    }
+
+    for (const family of families) {
+      for (const candidate of candidates) {
+        if (getFamily(candidate) === family) pushUnique(candidate);
+      }
+    }
+
+    for (const candidate of candidates) pushUnique(candidate);
+    return ordered;
+  }
+
+  function hasExpectedDateValue(input, expectedIsoDate, attemptedValue) {
+    return input.value === attemptedValue || normalizeDateValue(input.value) === expectedIsoDate;
   }
 
   function getReactProps(element) {
@@ -244,58 +349,74 @@
     return false;
   }
 
-  async function setDatePickerValue(input, dateStrCz) {
-    log(`    Attempting to set value: "${dateStrCz}" (current: "${input.value}")`);
+  async function setDatePickerValue(input, isoDate) {
+    const candidates = getOrderedDateInputCandidates(isoDate, input);
+    log(
+      `    Attempting to set ISO date "${isoDate}" ` +
+      `(current: "${input.value}", candidates: ${candidates.join(" | ")})`
+    );
 
-    // --- Strategy 1: document.execCommand('insertText') ---
-    // This is the most reliable way to set React-controlled inputs because
-    // the browser generates the same internal events as real user typing.
-    input.focus();
-    await sleep(150);
-    input.select();
-    document.execCommand("selectAll", false, null);
-    await sleep(50);
-    document.execCommand("insertText", false, dateStrCz);
-    await sleep(200);
-
-    if (input.value === dateStrCz) {
-      log("    Strategy 1 (execCommand) succeeded");
-      input.blur();
-      await sleep(100);
-      return;
-    }
-    log(`    Strategy 1 failed: value="${input.value}"`);
-
-    // --- Strategy 2: React onChange via fiber ---
-    const changed = triggerReactChange(input, dateStrCz);
-    if (changed) {
-      await sleep(200);
-      log(`    Strategy 2 (React onChange): value="${input.value}"`);
-      input.blur();
-      await sleep(100);
-      return;
-    }
-    log("    Strategy 2 skipped: no React onChange found");
-
-    // --- Strategy 3: nativeInputValueSetter + InputEvent ---
     const nativeSetter = Object.getOwnPropertyDescriptor(
       window.HTMLInputElement.prototype, "value"
     ).set;
-    nativeSetter.call(input, dateStrCz);
-    input.dispatchEvent(
-      new InputEvent("input", {
-        bubbles: true,
-        cancelable: true,
-        inputType: "insertText",
-        data: dateStrCz,
-      })
-    );
-    input.dispatchEvent(new Event("change", { bubbles: true }));
-    await sleep(200);
-    log(`    Strategy 3 (nativeSetter+InputEvent): value="${input.value}"`);
 
-    // --- Strategy 4: character-by-character via execCommand ---
-    if (input.value !== dateStrCz) {
+    for (const candidate of candidates) {
+      log(`    Trying candidate "${candidate}"`);
+
+      // --- Strategy 1: document.execCommand('insertText') ---
+      input.focus();
+      await sleep(150);
+      input.select();
+      document.execCommand("selectAll", false, null);
+      await sleep(50);
+      document.execCommand("insertText", false, candidate);
+      await sleep(200);
+
+      if (hasExpectedDateValue(input, isoDate, candidate)) {
+        log(`    Strategy 1 (execCommand) succeeded with "${candidate}"`);
+        input.blur();
+        await sleep(100);
+        return;
+      }
+      log(`    Strategy 1 failed: value="${input.value}"`);
+
+      // --- Strategy 2: React onChange via fiber ---
+      const changed = triggerReactChange(input, candidate);
+      if (changed) {
+        await sleep(200);
+        if (hasExpectedDateValue(input, isoDate, candidate)) {
+          log(`    Strategy 2 (React onChange) succeeded with "${candidate}"`);
+          input.blur();
+          await sleep(100);
+          return;
+        }
+        log(`    Strategy 2 changed value to "${input.value}"`);
+      } else {
+        log("    Strategy 2 skipped: no React onChange found");
+      }
+
+      // --- Strategy 3: nativeInputValueSetter + InputEvent ---
+      nativeSetter.call(input, candidate);
+      input.dispatchEvent(
+        new InputEvent("input", {
+          bubbles: true,
+          cancelable: true,
+          inputType: "insertText",
+          data: candidate,
+        })
+      );
+      input.dispatchEvent(new Event("change", { bubbles: true }));
+      await sleep(200);
+
+      if (hasExpectedDateValue(input, isoDate, candidate)) {
+        log(`    Strategy 3 (nativeSetter+InputEvent) succeeded with "${candidate}"`);
+        input.blur();
+        await sleep(100);
+        return;
+      }
+      log(`    Strategy 3 failed: value="${input.value}"`);
+
+      // --- Strategy 4: character-by-character via execCommand ---
       log("    Strategy 4: clearing and typing char-by-char via execCommand");
       input.focus();
       await sleep(100);
@@ -303,16 +424,24 @@
       document.execCommand("delete", false, null);
       await sleep(50);
 
-      for (const char of dateStrCz) {
+      for (const char of candidate) {
         document.execCommand("insertText", false, char);
         await sleep(30);
       }
       await sleep(150);
-      log(`    Strategy 4 result: value="${input.value}"`);
+
+      if (hasExpectedDateValue(input, isoDate, candidate)) {
+        log(`    Strategy 4 (char-by-char) succeeded with "${candidate}"`);
+        input.blur();
+        await sleep(100);
+        return;
+      }
+      log(`    Strategy 4 failed: value="${input.value}"`);
     }
 
     input.blur();
     await sleep(100);
+    throw new Error(`Nepodařilo se nastavit datum "${isoDate}" do inputu`);
   }
 
   function findElementByText(root, selector, text) {
@@ -646,7 +775,7 @@
     const allInputs = Array.from(modal.querySelectorAll(INPUT_SEL));
     const dateInputs = allInputs.filter((inp) => {
       const val = inp.value || "";
-      return /^\d{1,2}\.\d{1,2}\.\d{4}$/.test(val) || /^\d{4}-\d{2}-\d{2}$/.test(val);
+      return isDateLikeValue(val);
     });
 
     // If no inputs have date values yet, include all non-button text inputs
@@ -669,7 +798,7 @@
     return findElementByText(modal, "button, [role='button']", CONFIG.confirmButtonText);
   }
 
-  async function updateSingleComponent(componentInfo, dateFromCz, dateToCz, index, total) {
+  async function updateSingleComponent(componentInfo, dateFromIso, dateToIso, index, total) {
     const { wrapper } = componentInfo;
     const sectionHeader =
       wrapper.querySelector("[class*='header'] span, h2, h3, h4")?.textContent?.trim() || `#${index + 1}`;
@@ -745,12 +874,12 @@
       throw new Error(`Oba datumy ukazují na stejný input - nelze rozlišit Období od/do`);
     }
 
-    log(`  Setting dateFrom: ${dateFromCz} (current: "${dateFromInput.value}")`);
-    await setDatePickerValue(dateFromInput, dateFromCz);
+    log(`  Setting dateFrom: ${dateFromIso} (current: "${dateFromInput.value}")`);
+    await setDatePickerValue(dateFromInput, dateFromIso);
     await sleep(CONFIG.timings.afterDateSet);
 
-    log(`  Setting dateTo: ${dateToCz} (current: "${dateToInput.value}")`);
-    await setDatePickerValue(dateToInput, dateToCz);
+    log(`  Setting dateTo: ${dateToIso} (current: "${dateToInput.value}")`);
+    await setDatePickerValue(dateToInput, dateToIso);
     await sleep(CONFIG.timings.afterDateSet);
 
     const confirmBtn = findConfirmButton(modal);
@@ -780,9 +909,7 @@
   }
 
   async function applyToAll(dateFromIso, dateToIso) {
-    const dateFromCz = formatDateCz(dateFromIso);
-    const dateToCz = formatDateCz(dateToIso);
-    log(`Applying dates: ${dateFromCz} – ${dateToCz}`);
+    log(`Applying dates: ${dateFromIso} – ${dateToIso}`);
 
     const components = findSfcComponents();
     if (components.length === 0) {
@@ -798,7 +925,7 @@
 
     for (let i = 0; i < components.length; i++) {
       try {
-        await updateSingleComponent(components[i], dateFromCz, dateToCz, i, components.length);
+        await updateSingleComponent(components[i], dateFromIso, dateToIso, i, components.length);
         successCount++;
       } catch (err) {
         errorCount++;
