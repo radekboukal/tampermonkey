@@ -26,8 +26,8 @@
       afterDateSet: 500,
       afterConfirm: 1500,
       pollInterval: 200,
-      modalTimeout: 8000,
-      modalCloseTimeout: 8000,
+      modalTimeout: 3000,
+      modalCloseTimeout: 3000,
     },
     debug: true,
   };
